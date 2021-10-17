@@ -1,66 +1,114 @@
-## System Architecture
+# QL-BOT
 
-The system is designed as a state-driven graph. Instead of a linear script, the agent has the "agency" to decide its own path based on the database's feedback.
+Natural-language interface for querying and updating a sample employee SQLite database, powered by a LangGraph agent and Groq.
 
-1.  **Intent Classification**: A guardrail node that filters out non-SQL or off-topic queries.
-2.  **Semantic Retrieval**: Queries a **Qdrant Vector Store** to inject relevant column metadata into the LLM context, preventing hallucinations.
-3.  **The ReAct Loop**:
-    * **Agent**: Generates SQL queries using openai/gpt-oss-20b (via Groq).
-    * **Tool**: Executes queries against the SQLite database using SQLAlchemy.
-    * **Feedback**: If a query fails, the agent receives the error and self-corrects in the next loop.
-4.  **Streamlit UI**: A ChatGPT-style interface that displays the agent's thought process and status updates in real-time.
+## Overview
 
+QL-BOT (Agentic SQL Analyst) combines intent classification, vector-based schema retrieval, and a ReAct-style SQL tool loop so users can ask questions in plain English instead of writing SQL by hand. A Streamlit chat UI streams agent status while the graph classifies the request, retrieves column context from an in-memory Qdrant store, generates SQL via Groq, and executes allowed statements against SQLite.
 
-# Tech Stack
-**Language** : Python 3.10+
+## Features
 
-**LLM Orchestration** : LangGraph & LangChain
+- Chat UI with session history and a clear-history control
+- Guardrail node that rejects off-topic prompts before SQL runs
+- Semantic schema retrieval (HuggingFace embeddings + Qdrant) to ground the LLM
+- LangGraph workflow: classify → retrieve → agent ↔ tools
+- SQL execution limited to `SELECT`, `INSERT`, `UPDATE`, and `DELETE` (blocks DDL)
+- Sample `employees` table seeded for local demos
 
-**LLM** : Groq (openai/gpt-oss-20b)
+## Tech stack
 
-**Vector DB** : Qdrant (In-memory)
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.10+ |
+| UI | Streamlit |
+| Orchestration | LangGraph, LangChain |
+| LLM | Groq (`openai/gpt-oss-20b`) |
+| Vector store | Qdrant (in-memory) |
+| Embeddings | `sentence-transformers/all-mpnet-base-v2` |
+| Database | SQLite via SQLAlchemy |
 
-**Database** : SQLite
+## Prerequisites
 
-**Embeddings** : HuggingFace (all-mpnet-base-v2)
+- Python 3.10 or newer
+- A [Groq](https://console.groq.com/) API key
 
-# Table Details
+## Getting started
 
-**name**: The full name of the employee which is unique
-
-**designation**: The job title or role
-
-**department**: The department name (AI, HR, Sales)
-
-**salary**: The numeric value representing annual pay
-
-**id**: The unique primary key
-
-
-### 1. Prerequisites
-Ensure you have Python 3.10+ installed. You will also need a **Groq API Key**.
-
--- Configuration
-
-Create a .env file in the root directory:
-
-Code snippet: 
-GROQ_API_KEY=your_groq_api_key_here
-
-### 2. Installation
 ```bash
-# Clone the repository
-git clone "[git repo](https://github.com/Hrithik-coder/SQL_AGENT.git)"
-
-cd agentic-sql-analyst
-
-# Install dependencies
+git clone https://github.com/vonmiller1/QL-BOT.git
+cd QL-BOT
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+```
 
-# run employee_table.py for the table creation
+Copy the environment template and set your key (names only—never commit real secrets):
+
+```bash
+copy .env.example .env   # Windows
+# cp .env.example .env   # macOS/Linux
+```
+
+Required variable:
+
+- `GROQ_API_KEY` — Groq API key used by `ChatGroq`
+
+Initialize the SQLite database and seed sample data:
+
+```bash
 python employee_table.py
+```
 
-first add some employee data by querying the agent then perform the various actions
+## Running locally
 
-# run the streamlit application
+```bash
 streamlit run app.py
+```
+
+Streamlit serves the app at [http://localhost:8501](http://localhost:8501) by default.
+
+Example prompts:
+
+- "List all employees in the AI department."
+- "Give hrithik a 10% raise and show the updated salary."
+
+## Testing
+
+This repository does not ship automated tests. To verify manually, start the app, run a few SELECT queries, then try an off-topic question to confirm the classifier blocks it.
+
+## Project structure
+
+```
+QL-BOT/
+├── app.py              # Streamlit entrypoint
+├── agent_code.py       # LangGraph graph, tools, and nodes
+├── employee_table.py   # SQLite engine and schema seed script
+├── requirements.txt    # Python dependencies
+├── .env.example        # Environment variable template
+└── README.md
+```
+
+Runtime artifacts (not committed): `employee_db.sqlite`, local `.env`.
+
+## Configuration
+
+| Variable | Purpose |
+|----------|---------|
+| `GROQ_API_KEY` | Authenticates Groq LLM calls |
+
+Qdrant runs in-process (`:memory:`); no separate vector DB service is required for local use.
+
+## Deployment
+
+No Dockerfile or CI workflow is included. For production you would externalize secrets, use a persistent Qdrant instance, and harden SQL policies beyond the demo guardrails.
+
+## Contributing
+
+1. Fork the repository and create a feature branch.
+2. Keep commits focused (one logical change per commit when possible).
+3. Open a pull request with a short description of behavior and setup impact.
+
+## License
+
+No `LICENSE` file is present in this repository; add one if you plan to distribute or accept contributions under explicit terms.
