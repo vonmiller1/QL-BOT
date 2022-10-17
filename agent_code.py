@@ -1,7 +1,7 @@
-import os
-from typing import Annotated, TypedDict, List, Union
+import re
+from typing import Annotated, TypedDict, List
 from langchain_groq import ChatGroq
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages import BaseMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END, add_messages
 from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -17,7 +17,6 @@ load_dotenv()
 client = QdrantClient(":memory:")
 collection = "employee_schema"
 
-
 client.create_collection(
     collection_name=collection,
     vectors_config=VectorParams(size=768, distance=Distance.COSINE),
@@ -31,14 +30,16 @@ schema_descriptions = [
     "designation: The job title or role",
     "department: The department name (AI, HR, Sales)",
     "salary: The numeric value representing annual pay",
-    "id: The unique primary key"
+    "id: The unique primary key",
 ]
 vectorstore.add_texts(schema_descriptions)
+
+_FORBIDDEN_SQL = re.compile(r"\b(drop|alter|truncate)\b", re.IGNORECASE)
 
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-    is_valid: bool  
+    is_valid: bool
 
 
 @tool
@@ -47,15 +48,18 @@ def execute_sql(sql_query: str) -> str:
     Executes a SQLite query against the employee database.
     SELECT, INSERT, UPDATE, or DELETE.
     """
-    forbidden = ["drop", "alter", "truncate"]
-    if any(word in sql_query.lower() for word in forbidden):
+    if _FORBIDDEN_SQL.search(sql_query):
         return "Security Error: Schema changes are not allowed."
+
+    normalized = sql_query.strip().rstrip(";")
+    if ";" in normalized:
+        return "Security Error: Only a single SQL statement is allowed."
 
     try:
         with db_engine.connect() as conn:
-            result = conn.execute(text(sql_query))
+            result = conn.execute(text(normalized))
             conn.commit()
-            if sql_query.lower().strip().startswith("select"):
+            if normalized.lower().startswith("select"):
                 return f"Data: {str(result.fetchall())}"
             return f"Success: {result.rowcount} row(s) affected."
     except Exception as e:
@@ -65,50 +69,68 @@ def execute_sql(sql_query: str) -> str:
 llm = ChatGroq(temperature=0, model_name="openai/gpt-oss-20b")
 llm_with_tools = llm.bind_tools([execute_sql])
 
+
 def classifier_node(state: AgentState):
     """Guardrail: Ensures the query is actually about the employee database."""
     last_user_msg = state["messages"][-1].content
-    prompt = f"Is the following question strictly related to managing or querying employee data? Question: '{last_user_msg}'. Answer ONLY 'Yes' if the Question is completely related to managing Database otherwise even there is slightly unrelated content then Answer 'No'."
+    prompt = (
+        f"Is the following question strictly related to managing or querying employee data? "
+        f"Question: '{last_user_msg}'. Answer ONLY 'Yes' if the Question is completely related "
+        f"to managing Database otherwise even there is slightly unrelated content then Answer 'No'."
+    )
     res = llm.invoke(prompt).content.strip().lower()
-    
-    if 'yes' in res:
+
+    if "yes" in res:
         return {"is_valid": True}
-    # print(state)
-    return {"is_valid": False, "messages": [AIMessage(content="I'm sorry, I can only assist with employee database operations.")]}
+    return {
+        "is_valid": False,
+        "messages": [AIMessage(content="I'm sorry, I can only assist with employee database operations.")],
+    }
+
 
 def retriever_node(state: AgentState):
     """Retrieves schema context from Qdrant to guide the LLM."""
-    if not state.get("is_valid"): return {"messages": AIMessage(content=f"I am SQL agent only answers about the Database related queries")}
-    
-    query = state["messages"][0].content 
+    if not state.get("is_valid"):
+        return {
+            "messages": [
+                AIMessage(content="I am SQL agent only answers about the Database related queries")
+            ]
+        }
+
+    query = state["messages"][0].content
     hits = vectorstore.similarity_search(query, k=4)
     context = " | ".join([h.page_content for h in hits])
-    
+
     sys_msg = SystemMessage(content=f"Available Table: employees. Relevant Columns: {context}")
-    # print(state)
     return {"messages": [sys_msg]}
+
 
 def agent_node(state: AgentState):
     """Processes history and decides next tool call."""
-    if not state.get("is_valid"): return END
+    if not state.get("is_valid"):
+        return {
+            "messages": [
+                AIMessage(content="I'm sorry, I can only assist with employee database operations.")
+            ]
+        }
 
-
-    core_behavior = SystemMessage(content=(
-        """You are a Senior SQL Analyst. 
-        Rules: 
-        1. Be extremely concise. 
-        2. If a query fails, don't try any alternative just explain the error. 
-        3. Never explain the SQL unless asked. 
+    core_behavior = SystemMessage(
+        content=(
+            """You are a Senior SQL Analyst.
+        Rules:
+        1. Be extremely concise.
+        2. If a query fails, don't try any alternative just explain the error.
+        3. Never explain the SQL unless asked.
         4. Always show the data results as Markdown tables.
         5. if the question has other content that is not related to managing DB then don't respond"""
-    ))
+        )
+    )
 
-   
     full_messages = [core_behavior] + state["messages"]
-    
+
     response = llm_with_tools.invoke(full_messages)
-    # print(state)
     return {"messages": [response]}
+
 
 def tool_node(state: AgentState):
     """Runs the SQL generated by the agent."""
@@ -117,7 +139,6 @@ def tool_node(state: AgentState):
     for call in last_msg.tool_calls:
         out = execute_sql.invoke(call["args"])
         results.append(ToolMessage(tool_call_id=call["id"], content=str(out)))
-    # print(state)
     return {"messages": results}
 
 
@@ -125,7 +146,7 @@ def router(state: AgentState):
     """Decides if we stop, go to tools, or start the agent."""
     if not state.get("is_valid"):
         return END
-    
+
     last_msg = state["messages"][-1]
     if last_msg.tool_calls:
         return "tools"
@@ -141,10 +162,9 @@ builder.add_node("tools", tool_node)
 
 builder.add_edge(START, "classify")
 
-
 builder.add_conditional_edges(
     "classify",
-    lambda state: "retrieve" if state["is_valid"] else END
+    lambda state: "retrieve" if state["is_valid"] else END,
 )
 
 builder.add_edge("retrieve", "agent")
@@ -152,8 +172,3 @@ builder.add_conditional_edges("agent", router)
 builder.add_edge("tools", "agent")
 
 graph = builder.compile()
-
-
-
-
-
