@@ -1,0 +1,11 @@
+langchain-core>=0.2.0
+langchain-groq>=0.1.0
+langgraph>=0.2.0
+qdrant-client>=1.9.0
+langchain-qdrant>=0.1.0
+langchain-huggingface>=0.0.3
+sentence-transformers>=3.0.0
+sqlalchemy>=2.0.0
+pandas>=2.0.0
+streamlit
+python-dotenv>=1.0.0
