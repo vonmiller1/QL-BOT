@@ -1,0 +1,8 @@
+.env
+employee_db.sqlite
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.streamlit/secrets.toml
+.kilo/
